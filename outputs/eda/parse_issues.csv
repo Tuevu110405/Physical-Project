@@ -1,0 +1,5 @@
+qa_id,video_id,question,quantity_family,output_unit,output_unit_source,target_entities,parse_confidence,warnings
+506,simulation_0193,What is the orbital diameter of the Io model?,size,m,video_context,the io model,0.9299999999999999,Output unit inferred as 'm' from same-video length questions.
+507,simulation_0193,What is the orbital diameter of the Europa model?,size,m,video_context,the europa model,0.9299999999999999,Output unit inferred as 'm' from same-video length questions.
+508,simulation_0193,What is the orbital diameter of the Ganymede model?,size,m,video_context,the ganymede model,0.9299999999999999,Output unit inferred as 'm' from same-video length questions.
+509,simulation_0193,What is the orbital diameter of the Callisto model?,size,m,video_context,the callisto model,0.9299999999999999,Output unit inferred as 'm' from same-video length questions.

@@ -1,0 +1,11 @@
+# Vision stage: text grounding + promptable video segmentation/tracking
+# SAM2 Video entered Transformers in 2025; keep v5 to use the documented Sam2VideoModel API.
+transformers>=5.3.0,<6.0
+accelerate>=1.0
+safetensors>=0.4
+torch>=2.5
+torchvision>=0.20
+opencv-python>=4.10
+Pillow>=10.0
+numpy>=1.26
+tqdm>=4.66

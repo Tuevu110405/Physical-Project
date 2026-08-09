@@ -1,0 +1,39 @@
+{
+  "num_questions": 159,
+  "num_videos": 24,
+  "questions_per_video": {
+    "min": 3,
+    "median": 6.0,
+    "mean": 6.625,
+    "max": 13
+  },
+  "parse_quality": {
+    "unknown_quantity": 0,
+    "missing_output_unit_after_grouping": 0,
+    "contextually_inferred_units": 4,
+    "questions_without_entities": 0,
+    "low_confidence_below_0_75": 0,
+    "mean_confidence": 0.9982389937106918
+  },
+  "dataset_properties": {
+    "questions_with_depth": 90,
+    "videos_with_depth": 12,
+    "questions_with_prior": 159,
+    "unique_video_sources": 4,
+    "unique_video_types": 17,
+    "unique_fps_values": [
+      24.0,
+      25.0,
+      30.0,
+      33.0
+    ]
+  },
+  "ground_truth_scale": {
+    "min": 0.00175,
+    "median": 3.604,
+    "max": 1086.09,
+    "log10_min": -2.7569619513137056,
+    "log10_max": 3.0358658150169666,
+    "observed_decades": 5.792827766330673
+  }
+}

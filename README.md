@@ -201,6 +201,102 @@ This parser is intentionally deterministic. It extracts the structured measureme
 
 For a production system, add an optional VLM fallback only for rows in `parse_issues.csv`, then validate the returned JSON with the existing Pydantic schema. Do not replace the deterministic path for easy cases.
 
+## LLM landmark plans and canonical parent tracks
+
+The numeric/time/unit parser remains deterministic. An optional OpenAI-compatible
+LLM (including a local vLLM server) supplies the semantic entity and landmark
+graph between question parsing and vision inference:
+
+```text
+parsed question
+      -> deterministic quantity/time/unit fields
+      -> optional LLM semantic landmark plan
+      -> validated MeasurementPlan v2
+      -> canonical parent tracking requests
+      -> parent masks
+      -> landmark candidates and LandmarkResult
+      -> quantity-specific solver
+```
+
+Generate plans without loading GroundingDINO or SAM2:
+
+```bash
+python scripts/03_build_measurement_plans.py \
+  --groups data/processed/grouped_by_video.jsonl \
+  --output data/processed/measurement_plans_by_video.jsonl
+```
+
+Enable semantic landmark planning against an OpenAI-compatible endpoint:
+
+```bash
+python scripts/03_build_measurement_plans.py \
+  --semantic-model YOUR_MODEL \
+  --llm-base-url http://127.0.0.1:8000/v1
+```
+
+LLM output is validated against a closed landmark DSL and cached in
+`outputs/planning/semantic_plan_cache.jsonl`. If the endpoint fails, the legacy
+rule plan is used with an explicit warning; unknown landmarks are never silently
+declared resolved by the landmark resolver.
+
+`MeasurementPlan` records:
+
+- measurement kind, relation, reduction, axis, unit, and temporal window;
+- solver operands with parent track and landmark semantics;
+- calibration routing from `video_type` (`S/V/A`, `2D/3D`, object setting,
+  background) and `inference_type` (`SS/SD/DS/DD`);
+- prior and depth observations needed by the downstream solver.
+
+Part expressions are canonicalized to a reusable parent mask. For example:
+
+```text
+wooden pier                              -> track: pier
+outer end of the pier                    -> track: pier, landmark: outer_end
+pier from shore-side to water-side edge  -> track: pier,
+                                             landmarks: shore_side_edge,
+                                                        water_side_edge
+```
+
+The vision output embeds all measurement plans and adds `aliases`, `landmarks`,
+and `measurement_plan_ids` to each canonical object. A landmark is not treated
+as a separate SAM2 object. `LandmarkResolver` derives geometry candidates from
+the parent mask, uses reference masks when available, and optionally asks a VLM
+to choose a labelled candidate. Results are written to
+`outputs/vision/landmark_results/<video_id>.json`.
+
+`TwoDSolver` consumes those resolved geometries (never the raw question) and
+writes `outputs/vision/solver_results/<video_id>.json`. It reports
+`solved_physical` only when planar calibration is supported and a reference
+track can be measured. Otherwise it preserves an auditable `solved_pixel` or
+`unresolved` result instead of inventing a metric answer for a 3D scene.
+
+Run the full stage with both planners:
+
+```bash
+python scripts/04_segment_and_track.py \
+  --video-dir /path/to/videos \
+  --semantic-model YOUR_TEXT_MODEL \
+  --vlm-model YOUR_VISION_MODEL \
+  --llm-base-url http://127.0.0.1:8000/v1
+```
+
+For a Colab T4, the recommended workflow is split across two runtimes so the
+tracker and VLM never compete for VRAM:
+
+1. [`notebooks/colab_stage1_grounding_sam_export.ipynb`](notebooks/colab_stage1_grounding_sam_export.ipynb)
+   runs GroundingDINO + SAM2 and saves masks/tracks to Drive.
+2. [`notebooks/colab_stage2_vlm_landmark.ipynb`](notebooks/colab_stage2_vlm_landmark.ipynb)
+   reloads those artifacts in a fresh runtime and tests a 4-bit 7–8B VLM.
+
+The Stage 2 notebook defaults to Qwen3-VL-8B-Instruct and includes stable/fast
+fallback presets for Qwen2.5-VL-7B and Qwen2.5-VL-3B.
+
+Generate an EDA table grouped by normalized landmark program:
+
+```bash
+python scripts/05_landmark_eda.py
+```
+
 ## Data attribution
 
 QuantiPhy validation dataset: PaulineLi/QuantiPhy-validation, CC BY 4.0. See the official dataset card and repository for competition rules and updates.

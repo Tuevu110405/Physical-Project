@@ -1,8 +1,16 @@
 from __future__ import annotations
 
 import re
+from dataclasses import asdict
 from dataclasses import dataclass, field
 from typing import Any, Iterable
+
+from quantiphy_baseline.measurement_plan import (
+    CanonicalEntity,
+    MeasurementPlan,
+    build_measurement_plans,
+    canonicalize_entity,
+)
 
 
 PROPERTY_WORDS = {
@@ -18,11 +26,15 @@ class TrackingRequest:
     entity_key: str
     display_name: str
     prompts: list[str]
+    parent_key: str | None = None
     roles: list[str] = field(default_factory=list)  # target/reference
-    visual_kind: str = "object"  # object/part/pair/text/region
+    visual_kind: str = "object"  # tracked parent: object/pair/text/region
     expected_instances: int = 1
     preferred_times_s: list[float] = field(default_factory=list)
     source_qa_ids: list[str] = field(default_factory=list)
+    measurement_plan_ids: list[str] = field(default_factory=list)
+    aliases: list[str] = field(default_factory=list)
+    landmarks: list[dict[str, Any]] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
 
@@ -55,18 +67,19 @@ def clean_entity_name(entity: str) -> str:
 
 
 def infer_visual_kind(entity: str) -> tuple[str, int, list[str]]:
+    canonical = canonicalize_entity(entity)
     s = clean_entity_name(entity)
     notes: list[str] = []
-    if s.startswith("between the two "):
+    if canonical.visual_kind == "pair":
         notes.append("Pair-like spatial entity: track the two physical objects separately.")
         return "pair", 2, notes
-    if " text " in f" {s} " or "lettering" in s:
+    if canonical.visual_kind == "text":
         notes.append("Text region: GroundingDINO may be weak; OCR/text detector is a recommended fallback.")
         return "text", 1, notes
-    if any(k in s for k in ["outer end of", "edge of", "tip", "top edge", "bottom edge"]):
+    if canonical.visual_kind == "part":
         notes.append("Part/landmark entity: track the parent object, then derive the requested edge/keypoint from its mask.")
         return "part", 1, notes
-    if s.startswith("between "):
+    if canonical.visual_kind == "region" or s.startswith("between "):
         return "region", 1, notes
     return "object", 1, notes
 
@@ -84,14 +97,16 @@ def _singularize_simple(s: str) -> str:
 def prompt_candidates(entity: str) -> list[str]:
     raw = clean_entity_name(entity)
     visual_kind, expected, _ = infer_visual_kind(entity)
-    prompts: list[str] = []
+    canonical = canonicalize_entity(entity)
+    prompts: list[str] = list(canonical.prompts)
 
     if visual_kind == "pair" and raw.startswith("between the two "):
         raw = raw[len("between the two "):]
         raw = _singularize_simple(raw)
 
     # Strongest prompt first: preserve attributes / referring expression.
-    prompts.append(raw)
+    if raw not in prompts:
+        prompts.append(raw)
 
     # Parenthetical aliases: "person on the left (the passer)".
     paren = re.findall(r"\((.*?)\)", raw)
@@ -208,38 +223,91 @@ def _collect_times(question: dict[str, Any]) -> list[float]:
     return sorted({float(v) for v in vals if isinstance(v, (int, float))})
 
 
-def build_tracking_requests(group: dict[str, Any]) -> list[TrackingRequest]:
+def build_tracking_requests(
+    group: dict[str, Any], plans: list[MeasurementPlan] | None = None
+) -> list[TrackingRequest]:
     all_targets: list[str] = []
     for q in group.get("questions", []):
         all_targets.extend(q.get("target_entities") or [])
 
     requests: dict[str, TrackingRequest] = {}
+    plans = plans if plans is not None else build_measurement_plans(group)
+    plans_by_qa = {plan.qa_id: plan for plan in plans}
 
-    def add(entity: str, role: str, qa_id: str | None, times: list[float]):
-        visual_kind, expected_instances, notes = infer_visual_kind(entity)
-        key = slugify_entity(entity)
+    def add(
+        entity: str | CanonicalEntity,
+        role: str,
+        qa_id: str | None,
+        times: list[float],
+        plan_id: str | None = None,
+    ):
+        canonical = entity if isinstance(entity, CanonicalEntity) else canonicalize_entity(entity)
+        source_text = canonical.raw_text
+        _, _, notes = infer_visual_kind(source_text)
+        key = canonical.tracking_key
+        tracked_visual_kind = "object" if canonical.visual_kind == "part" else canonical.visual_kind
         if key not in requests:
             requests[key] = TrackingRequest(
                 entity_key=key,
-                display_name=entity,
-                prompts=prompt_candidates(entity),
+                parent_key=canonical.parent_key,
+                display_name=canonical.tracking_name,
+                prompts=list(canonical.prompts),
                 roles=[role],
-                visual_kind=visual_kind,
-                expected_instances=expected_instances,
+                visual_kind=tracked_visual_kind,
+                expected_instances=canonical.expected_instances,
+                aliases=[source_text],
                 notes=notes,
             )
         r = requests[key]
+        extra_prompts = (
+            prompt_candidates(source_text)
+            if canonical.landmark.kind == "whole_object"
+            else []
+        )
+        for prompt in (*canonical.prompts, *extra_prompts):
+            if prompt not in r.prompts:
+                r.prompts.append(prompt)
+        r.prompts = r.prompts[:5]
+        r.expected_instances = max(r.expected_instances, canonical.expected_instances)
+        if source_text not in r.aliases:
+            r.aliases.append(source_text)
+        if canonical.landmark.kind != "whole_object":
+            landmark = asdict(canonical.landmark)
+            if landmark not in r.landmarks:
+                r.landmarks.append(landmark)
         if role not in r.roles:
             r.roles.append(role)
         if qa_id is not None and qa_id not in r.source_qa_ids:
             r.source_qa_ids.append(str(qa_id))
+        if plan_id is not None and plan_id not in r.measurement_plan_ids:
+            r.measurement_plan_ids.append(plan_id)
         r.preferred_times_s = sorted(set(r.preferred_times_s + times))
+
+    def canonical_from_operand(operand) -> CanonicalEntity:
+        visual_kind = "object" if operand.landmark.kind == "whole_object" else "part"
+        return CanonicalEntity(
+            raw_text=operand.raw_text,
+            parent_key=operand.parent_key,
+            parent_name=operand.parent_name,
+            tracking_key=operand.tracking_key,
+            tracking_name=operand.tracking_name or operand.parent_name,
+            prompts=tuple(operand.prompts) or (operand.parent_name,),
+            landmark=operand.landmark,
+            instance_selector=operand.instance_selector,
+            expected_instances=operand.expected_instances,
+            visual_kind=visual_kind,
+        )
 
     for q in group.get("questions", []):
         qa_id = str(q.get("qa_id")) if q.get("qa_id") is not None else None
         times = _collect_times(q)
-        for e in q.get("target_entities") or []:
-            add(e, "target", qa_id, times)
+        plan = plans_by_qa.get(qa_id or "")
+        if plan is not None:
+            for operand in plan.operands:
+                add(canonical_from_operand(operand), "target", qa_id, times, plan.plan_id)
+        else:
+            for e in q.get("target_entities") or []:
+                add(e, "target", qa_id, times)
 
         prior = q.get("prior") or {}
         ref = extract_reference_entity(prior.get("description"), all_targets)
@@ -247,6 +315,34 @@ def build_tracking_requests(group: dict[str, Any]) -> list[TrackingRequest]:
             ref_times = times[:]
             if isinstance(prior.get("timestamp_s"), (int, float)):
                 ref_times.append(float(prior["timestamp_s"]))
-            add(ref, "reference", qa_id, sorted(set(ref_times)))
+            add(
+                ref,
+                "reference",
+                qa_id,
+                sorted(set(ref_times)),
+                plan.plan_id if plan is not None else None,
+            )
+
+    for plan in plans:
+        question = next(
+            (q for q in group.get("questions", []) if str(q.get("qa_id")) == plan.qa_id),
+            {},
+        )
+        times = _collect_times(question)
+        for item in plan.auxiliary_entities:
+            if item.get("tracking_requirement") == "context_only":
+                continue
+            prompts = tuple(item.get("tracking_prompts") or [item.get("category")])
+            canonical = CanonicalEntity(
+                raw_text=str(item.get("referring_expression") or item.get("category")),
+                parent_key=slugify_entity(str(item.get("category") or item.get("entity_id"))),
+                parent_name=str(item.get("category") or item.get("entity_id")),
+                tracking_key=slugify_entity(str(item.get("entity_id") or item.get("category"))),
+                tracking_name=str(item.get("referring_expression") or item.get("category")),
+                prompts=tuple(str(x) for x in prompts if x),
+                expected_instances=int(item.get("expected_instances") or 1),
+                visual_kind="region" if item.get("tracking_requirement") == "optional" else "object",
+            )
+            add(canonical, "reference", plan.qa_id, times, plan.plan_id)
 
     return list(requests.values())

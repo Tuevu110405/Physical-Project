@@ -48,6 +48,6 @@ def test_build_requests_target_and_reference():
         ]
     }
     reqs = build_tracking_requests(group)
-    names = {r.display_name: r for r in reqs}
-    assert "the orange ball" in names
+    names = {r.entity_key: r for r in reqs}
+    assert "orange_ball" in names
     assert any("reference" in r.roles for r in reqs)

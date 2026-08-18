@@ -53,10 +53,18 @@ class GroundingDinoGrounder:
         from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
 
         self.processor = AutoProcessor.from_pretrained(model_id)
-        self.dtype = torch.float16 if self.device.startswith("cuda") else torch.float32
-        self.model = AutoModelForZeroShotObjectDetection.from_pretrained(
-            model_id, torch_dtype=self.dtype
-        ).to(self.device)
+
+        # Keep GroundingDINO in FP32. The PyTorch fallback implementation of
+        # multi-scale deformable attention used by Transformers can construct
+        # its sampling grid in FP32. Loading the model in FP16 then makes
+        # grid_sample receive a Half input and a Float grid, which fails on
+        # Colab/T4 with "expected scalar type Half but found Float".
+        # SAM2 remains mixed/half precision; GroundingDINO Tiny is small enough
+        # for FP32 to be a safe baseline default.
+        self.model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id).to(
+            device=self.device, dtype=torch.float32
+        )
+        self.dtype = next(self.model.parameters()).dtype
         self.model.eval()
 
     @torch.inference_mode()

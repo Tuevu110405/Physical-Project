@@ -10,6 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from quantiphy_baseline.vision import GroundingDinoGrounder, Sam2Tracker, SegmentTrackPipeline
+from quantiphy_baseline.planning import LLMSemanticPlanner
+from quantiphy_baseline.vision import LandmarkResolver, OpenAICompatibleVLMSelector
 
 
 def parse_args():
@@ -25,6 +27,16 @@ def parse_args():
     p.add_argument("--anchor-samples", type=int, default=5)
     p.add_argument("--only-video", action="append", default=[])
     p.add_argument("--max-videos", type=int, default=None)
+    p.add_argument("--semantic-model", default=None,
+                   help="Enable LLM landmark planning with an OpenAI-compatible model.")
+    p.add_argument("--llm-base-url", default="http://127.0.0.1:8000/v1")
+    p.add_argument("--llm-api-key", default=None)
+    p.add_argument("--semantic-cache", default="outputs/planning/semantic_plan_cache.jsonl")
+    p.add_argument("--vlm-model", default=None,
+                   help="Optional OpenAI-compatible VLM used only for candidate selection.")
+    p.add_argument("--vlm-base-url", default=None)
+    p.add_argument("--vlm-debug-dir", default="outputs/vision/debug_overlays")
+    p.add_argument("--vlm-cache", default="outputs/planning/vlm_selection_cache.jsonl")
     return p.parse_args()
 
 
@@ -38,11 +50,30 @@ def main():
         text_threshold=args.text_threshold,
     )
     tracker = Sam2Tracker(model_id=args.sam2_model, device=args.device)
+    semantic_planner = None
+    if args.semantic_model:
+        semantic_planner = LLMSemanticPlanner(
+            model=args.semantic_model,
+            base_url=args.llm_base_url,
+            api_key=args.llm_api_key,
+            cache_path=args.semantic_cache,
+        )
+    vlm_selector = None
+    if args.vlm_model:
+        vlm_selector = OpenAICompatibleVLMSelector(
+            model=args.vlm_model,
+            base_url=args.vlm_base_url or args.llm_base_url,
+            api_key=args.llm_api_key,
+            debug_dir=args.vlm_debug_dir,
+            cache_path=args.vlm_cache,
+        )
     pipe = SegmentTrackPipeline(
         grounder=grounder,
         tracker=tracker,
         output_dir=args.output_dir,
         anchor_samples=args.anchor_samples,
+        semantic_planner=semantic_planner,
+        landmark_resolver=LandmarkResolver(vlm_selector=vlm_selector),
     )
 
     only = set(args.only_video)
@@ -57,7 +88,13 @@ def main():
             print(f"[vision] {group['video_id']}")
             result = pipe.process_group(group, video_dir=args.video_dir)
             failed = sum("error" in o for o in result["objects"].values())
-            print(f"  objects={len(result['objects'])}, failed={failed}")
+            resolved = sum(x["status"] == "resolved" for x in result["landmark_results"])
+            solved = sum(x["status"].startswith("solved") for x in result["solver_results"])
+            print(
+                f"  objects={len(result['objects'])}, failed={failed}, "
+                f"landmarks_resolved={resolved}/{len(result['landmark_results'])}, "
+                f"plans_solved={solved}/{len(result['solver_results'])}"
+            )
             n += 1
             if args.max_videos is not None and n >= args.max_videos:
                 break
